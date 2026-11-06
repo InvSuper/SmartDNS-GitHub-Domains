@@ -1,6 +1,11 @@
+# Workflow 运行产出文件（自动生成，不用手动提交）
 github-domains.list
 github-hosts.smartdns.conf
 github-hosts-address.smartdns.conf
+global-domains.list
+global-hosts.smartdns.conf
+
+# 源码文件
 !README.md
 !.gitignore
 !.github/

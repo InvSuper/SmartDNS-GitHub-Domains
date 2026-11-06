@@ -6,71 +6,130 @@ on:
   workflow_dispatch:      # 支持手动触发
 
 permissions:
-  contents: write         # 允许提交文件
+  contents: write
 
 jobs:
   extract:
     runs-on: ubuntu-latest
     steps:
-    - name: Fetch Loyalsoldier proxy-list (全部需海外代理的域名)
+    - name: 拉取 Loyalsoldier 列表源文件
       run: |
-        # 优先 fastly 加速，不行回退 raw.githubusercontent.com
-        curl -fsSL --connect-timeout 10 -m 120 \
-          "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/proxy-list.txt" \
-          -o /tmp/proxy-list.txt || \
-        curl -fsSL --connect-timeout 10 -m 120 \
-          "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt" \
-          -o /tmp/proxy-list.txt
+        fetch() {
+          local url="$1" out="$2"
+          curl -fsSL --connect-timeout 10 -m 120 \
+            "https://fastly.jsdelivr.net/gh/$url" -o "$out" || \
+          curl -fsSL --connect-timeout 10 -m 120 \
+            "https://raw.githubusercontent.com/$url" -o "$out" || \
+          echo "=== $out 拉取失败 ==="
+        }
 
-        echo "=== proxy-list 总行数: $(wc -l < /tmp/proxy-list.txt) ==="
+        # 1. proxy-list.txt — 所有需要海外代理的域名（用来过滤出 github）
+        fetch "Loyalsoldier/v2ray-rules-dat@release/proxy-list.txt" /tmp/proxy-list.txt
 
-    - name: 过滤 GitHub 相关域名 + 生成 SmartDNS conf
-      env:
-        GROUP: github      # ← 改成你 SmartDNS 里实际的 github 组名
+        # 2. china-list.txt — 国内加速域名（global 组用，剔除 github 后）
+        fetch "Loyalsoldier/v2ray-rules-dat@release/china-list.txt" /tmp/china-list.txt
+
+        # 3. GitHub520 hosts — 静态 IP 兜底（address conf）
+        fetch "521xueweihan/GitHub520@main/hosts" /tmp/gh520.hosts
+
+        echo "=== 源文件大小 ==="
+        wc -l /tmp/proxy-list.txt /tmp/china-list.txt 2>/dev/null || true
+        ls -lh /tmp/gh520.hosts 2>/dev/null || true
+
+    - name: 生成 github 组专属域名列表（从 proxy-list 过滤）
       run: |
-        # 1. 过滤出包含 github 的域名（大小写不敏感）
-        #    proxy-list.txt 里格式是：纯域名 或 full:xxx 或 domainSuffix:xxx
-        #    统一清洗成纯域名，去重排序
+        if [ ! -s /tmp/proxy-list.txt ]; then
+          echo "proxy-list.txt 为空，跳过"
+          exit 1
+        fi
+
+        # 清洗 proxy-list：去掉 full:/domain:/domainSuffix: 前缀，过滤 github 相关
         grep -i "github" /tmp/proxy-list.txt \
           | sed 's/^full://; s/^domainSuffix://; s/^domain://' \
           | grep -v "^#" \
           | grep -v "^$" \
-          | grep -v "^github\.cn" \
+          | grep -v "github\.cn" \
           | sort -u \
           > github-domains.list
 
-        echo "=== 过滤得到 $(wc -l < github-domains.list) 个 GitHub 域名 ==="
+        echo "=== github-domains.list: $(wc -l < github-domains.list) 行 ==="
         cat github-domains.list
 
-        # 2. 生成 SmartDNS nameserver conf（走 github 组）
+        # 同时生成 SmartDNS nameserver conf（走 github 组）
         {
           echo "# ==========================================="
           echo "# Auto-generated: $(date '+%F %T %Z')"
-          echo "# Source: https://github.com/Loyalsoldier/v2ray-rules-dat"
-          echo "# Group: $GROUP"
+          echo "# Source: https://github.com/Loyalsoldier/v2ray-rules-dat (proxy-list)"
+          echo "# 用途：github 服务器组专用域名"
           echo "# ==========================================="
           while read -r domain; do
-            [ -n "$domain" ] && echo "nameserver /$domain/$GROUP"
+            [ -n "$domain" ] && echo "nameserver /$domain/github"
           done < github-domains.list
         } > github-hosts.smartdns.conf
 
-        echo ""
-        echo "=== SmartDNS conf $(wc -l < github-hosts.smartdns.conf) 行 ==="
-        head -15 github-hosts.smartdns.conf
-        echo "..."
-        tail -5 github-hosts.smartdns.conf
+        echo "=== github-hosts.smartdns.conf: $(wc -l < github-hosts.smartdns.conf) 行 ==="
+        head -10 github-hosts.smartdns.conf
 
-    - name: 同时拉 GitHub520 hosts 生成 SmartDNS address conf（静态 IP 兜底）
+    - name: 生成 global 组域名列表（china-list 剔除 github）
       run: |
-        curl -fsSL --connect-timeout 10 -m 60 \
-          "https://raw.hellogithub.com/hosts" \
-          -o /tmp/gh520.hosts || echo "=== GitHub520 拉取失败，跳过 ==="
+        if [ ! -s /tmp/china-list.txt ]; then
+          echo "china-list.txt 为空，跳过"
+          exit 1
+        fi
 
+        # 1. 从 proxy-list 里提取所有 github 相关域名（用于剔除）
+        grep -i "github" /tmp/proxy-list.txt 2>/dev/null \
+          | sed 's/^full://; s/^domainSuffix://; s/^domain://' \
+          | grep -v "^#" \
+          | grep -v "^$" \
+          | grep -v "github\.cn" \
+          | sort -u \
+          > /tmp/github-domains-set.txt
+
+        # 2. 从 china-list 里剔除所有 github 相关域名（防止污染）
+        #    grep -ivF 不区分大小写 + 固定字符串模式
+        if [ -s /tmp/github-domains-set.txt ]; then
+          grep -ivFf /tmp/github-domains-set.txt /tmp/china-list.txt \
+            | grep -v "^#" \
+            | grep -v "^$" \
+            | sort -u \
+            > global-domains.list
+        else
+          # github-domains 为空（异常情况），直接用 china-list
+          grep -v "^#" /tmp/china-list.txt \
+            | grep -v "^$" \
+            | sort -u \
+            > global-domains.list
+        fi
+
+        echo "=== global-domains.list: $(wc -l < global-domains.list) 行 ==="
+        echo "（原始 china-list: $(wc -l < /tmp/china-list.txt) 行）"
+        echo "（剔除了 $(wc -l < /tmp/github-domains-set.txt) 个 github 域名）"
+        echo "--- 前 10 行 ---"
+        head -10 global-domains.list
+
+        # 同时生成 SmartDNS nameserver conf（走 global 组）
+        {
+          echo "# ==========================================="
+          echo "# Auto-generated: $(date '+%F %T %Z')"
+          echo "# Source: https://github.com/Loyalsoldier/v2ray-rules-dat (china-list)"
+          echo "# 用途：global 服务器组专用域名（已剔除 github 相关）"
+          echo "# ==========================================="
+          while read -r domain; do
+            [ -n "$domain" ] && echo "nameserver /$domain/global"
+          done < global-domains.list
+        } > global-hosts.smartdns.conf
+
+        echo "=== global-hosts.smartdns.conf: $(wc -l < global-hosts.smartdns.conf) 行 ==="
+
+    - name: GitHub520 静态 IP 兜底（address conf）
+      run: |
         if [ -s /tmp/gh520.hosts ]; then
           {
             echo "# ==========================================="
             echo "# Auto-generated: $(date '+%F %T %Z')"
-            echo "# Source: https://raw.hellogithub.com/hosts"
+            echo "# Source: https://raw.hellogithub.com/hosts (GitHub520)"
+            echo "# 用途：github 域名静态 IP 兜底"
             echo "# ==========================================="
             sed 's/\r$//' /tmp/gh520.hosts \
               | grep -v "^#" \
@@ -79,8 +138,10 @@ jobs:
               | awk '{print "address /" $2 "/" $1}'
           } > github-hosts-address.smartdns.conf
 
-          echo "=== GitHub520 address conf $(wc -l < github-hosts-address.smartdns.conf) 行 ==="
-          head -10 github-hosts-address.smartdns.conf
+          echo "=== github-hosts-address.smartdns.conf: $(wc -l < github-hosts-address.smartdns.conf) 行 ==="
+          head -8 github-hosts-address.smartdns.conf
+        else
+          echo "=== GitHub520 拉取失败，跳过 address conf ==="
         fi
 
     - name: 提交到仓库
@@ -90,7 +151,9 @@ jobs:
           github-domains.list
           github-hosts.smartdns.conf
           github-hosts-address.smartdns.conf
-        commit_message: "chore(auto): update github domain list [skip ci]"
+          global-domains.list
+          global-hosts.smartdns.conf
+        commit_message: "chore(auto): update domain lists [skip ci]"
         branch: master
         user_name: github-actions
         user_email: 41898282+github-actions[bot]@users.noreply.github.com
