@@ -1,0 +1,6 @@
+github-domains.list
+github-hosts.smartdns.conf
+github-hosts-address.smartdns.conf
+!README.md
+!.gitignore
+!.github/

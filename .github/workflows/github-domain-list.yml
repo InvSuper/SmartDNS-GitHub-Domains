@@ -1,0 +1,96 @@
+name: GitHub Domain List → SmartDNS
+
+on:
+  schedule:
+    - cron: '30 2 * * *'   # 每天凌晨 2:30 拉一次，与 Loyalsoldier 同步
+  workflow_dispatch:      # 支持手动触发
+
+permissions:
+  contents: write         # 允许提交文件
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Fetch Loyalsoldier proxy-list (全部需海外代理的域名)
+      run: |
+        # 优先 fastly 加速，不行回退 raw.githubusercontent.com
+        curl -fsSL --connect-timeout 10 -m 120 \
+          "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/proxy-list.txt" \
+          -o /tmp/proxy-list.txt || \
+        curl -fsSL --connect-timeout 10 -m 120 \
+          "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt" \
+          -o /tmp/proxy-list.txt
+
+        echo "=== proxy-list 总行数: $(wc -l < /tmp/proxy-list.txt) ==="
+
+    - name: 过滤 GitHub 相关域名 + 生成 SmartDNS conf
+      env:
+        GROUP: github      # ← 改成你 SmartDNS 里实际的 github 组名
+      run: |
+        # 1. 过滤出包含 github 的域名（大小写不敏感）
+        #    proxy-list.txt 里格式是：纯域名 或 full:xxx 或 domainSuffix:xxx
+        #    统一清洗成纯域名，去重排序
+        grep -i "github" /tmp/proxy-list.txt \
+          | sed 's/^full://; s/^domainSuffix://; s/^domain://' \
+          | grep -v "^#" \
+          | grep -v "^$" \
+          | grep -v "^github\.cn" \
+          | sort -u \
+          > github-domains.list
+
+        echo "=== 过滤得到 $(wc -l < github-domains.list) 个 GitHub 域名 ==="
+        cat github-domains.list
+
+        # 2. 生成 SmartDNS nameserver conf（走 github 组）
+        {
+          echo "# ==========================================="
+          echo "# Auto-generated: $(date '+%F %T %Z')"
+          echo "# Source: https://github.com/Loyalsoldier/v2ray-rules-dat"
+          echo "# Group: $GROUP"
+          echo "# ==========================================="
+          while read -r domain; do
+            [ -n "$domain" ] && echo "nameserver /$domain/$GROUP"
+          done < github-domains.list
+        } > github-hosts.smartdns.conf
+
+        echo ""
+        echo "=== SmartDNS conf $(wc -l < github-hosts.smartdns.conf) 行 ==="
+        head -15 github-hosts.smartdns.conf
+        echo "..."
+        tail -5 github-hosts.smartdns.conf
+
+    - name: 同时拉 GitHub520 hosts 生成 SmartDNS address conf（静态 IP 兜底）
+      run: |
+        curl -fsSL --connect-timeout 10 -m 60 \
+          "https://raw.hellogithub.com/hosts" \
+          -o /tmp/gh520.hosts || echo "=== GitHub520 拉取失败，跳过 ==="
+
+        if [ -s /tmp/gh520.hosts ]; then
+          {
+            echo "# ==========================================="
+            echo "# Auto-generated: $(date '+%F %T %Z')"
+            echo "# Source: https://raw.hellogithub.com/hosts"
+            echo "# ==========================================="
+            sed 's/\r$//' /tmp/gh520.hosts \
+              | grep -v "^#" \
+              | grep -v "Timeout" \
+              | grep -v "^$" \
+              | awk '{print "address /" $2 "/" $1}'
+          } > github-hosts-address.smartdns.conf
+
+          echo "=== GitHub520 address conf $(wc -l < github-hosts-address.smartdns.conf) 行 ==="
+          head -10 github-hosts-address.smartdns.conf
+        fi
+
+    - name: 提交到仓库
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        file_patterns: |
+          github-domains.list
+          github-hosts.smartdns.conf
+          github-hosts-address.smartdns.conf
+        commit_message: "chore(auto): update github domain list [skip ci]"
+        branch: master
+        user_name: github-actions
+        user_email: 41898282+github-actions[bot]@users.noreply.github.com
