@@ -23,13 +23,8 @@ jobs:
           echo "=== $out 拉取失败 ==="
         }
 
-        # 1. proxy-list.txt — 所有需要海外代理的域名（用来过滤出 github）
         fetch "Loyalsoldier/v2ray-rules-dat@release/proxy-list.txt" /tmp/proxy-list.txt
-
-        # 2. china-list.txt — 国内加速域名（global 组用，剔除 github 后）
         fetch "Loyalsoldier/v2ray-rules-dat@release/china-list.txt" /tmp/china-list.txt
-
-        # 3. GitHub520 hosts — 静态 IP 兜底（address conf）
         fetch "521xueweihan/GitHub520@main/hosts" /tmp/gh520.hosts
 
         echo "=== 源文件大小 ==="
@@ -43,7 +38,6 @@ jobs:
           exit 1
         fi
 
-        # 清洗 proxy-list：去掉 full:/domain:/domainSuffix: 前缀，过滤 github 相关
         grep -i "github" /tmp/proxy-list.txt \
           | sed 's/^full://; s/^domainSuffix://; s/^domain://' \
           | grep -v "^#" \
@@ -55,7 +49,6 @@ jobs:
         echo "=== github-domains.list: $(wc -l < github-domains.list) 行 ==="
         cat github-domains.list
 
-        # 同时生成 SmartDNS nameserver conf（走 github 组）
         {
           echo "# ==========================================="
           echo "# Auto-generated: $(date '+%F %T %Z')"
@@ -77,7 +70,6 @@ jobs:
           exit 1
         fi
 
-        # 1. 从 proxy-list 里提取所有 github 相关域名（用于剔除）
         grep -i "github" /tmp/proxy-list.txt 2>/dev/null \
           | sed 's/^full://; s/^domainSuffix://; s/^domain://' \
           | grep -v "^#" \
@@ -86,8 +78,6 @@ jobs:
           | sort -u \
           > /tmp/github-domains-set.txt
 
-        # 2. 从 china-list 里剔除所有 github 相关域名（防止污染）
-        #    grep -ivF 不区分大小写 + 固定字符串模式
         if [ -s /tmp/github-domains-set.txt ]; then
           grep -ivFf /tmp/github-domains-set.txt /tmp/china-list.txt \
             | grep -v "^#" \
@@ -95,7 +85,6 @@ jobs:
             | sort -u \
             > global-domains.list
         else
-          # github-domains 为空（异常情况），直接用 china-list
           grep -v "^#" /tmp/china-list.txt \
             | grep -v "^$" \
             | sort -u \
@@ -105,10 +94,7 @@ jobs:
         echo "=== global-domains.list: $(wc -l < global-domains.list) 行 ==="
         echo "（原始 china-list: $(wc -l < /tmp/china-list.txt) 行）"
         echo "（剔除了 $(wc -l < /tmp/github-domains-set.txt) 个 github 域名）"
-        echo "--- 前 10 行 ---"
-        head -10 global-domains.list
 
-        # 同时生成 SmartDNS nameserver conf（走 global 组）
         {
           echo "# ==========================================="
           echo "# Auto-generated: $(date '+%F %T %Z')"
@@ -144,16 +130,26 @@ jobs:
           echo "=== GitHub520 拉取失败，跳过 address conf ==="
         fi
 
+    - name: 显示产物列表（提交前检查）
+      run: |
+        echo "=== 工作目录文件 ==="
+        ls -la *.list *.smartdns.conf 2>/dev/null || echo "没有找到产物文件！"
+        git status --short
+
     - name: 提交到仓库
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
+        # 显式列出所有要提交的文件，即使 .gitignore 里排除也强制 add
         file_patterns: |
           github-domains.list
           github-hosts.smartdns.conf
           github-hosts-address.smartdns.conf
           global-domains.list
           global-hosts.smartdns.conf
+        # 关键：跳过 gitignore 检查，强制提交产物
+        skip_gitignore_check: true
         commit_message: "chore(auto): update domain lists [skip ci]"
-        branch: master
-        user_name: github-actions
+        branch: main
+        user_name: github-actions[bot]
         user_email: 41898282+github-actions[bot]@users.noreply.github.com
+        empty_commit: false
