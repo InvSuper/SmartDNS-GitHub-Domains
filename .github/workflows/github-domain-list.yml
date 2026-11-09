@@ -45,21 +45,26 @@ jobs:
         echo "github-domains.list = $(wc -l < github-domains.list)"
         cat github-domains.list
 
-    - name: Build global-domains.list (china-list minus github)
+    - name: Build global-domains.list (proxy-list minus github)
       run: |
         cd "$GITHUB_WORKSPACE"
-        # 先从 proxy-list 里拿 github 域名集合
+        # github 域名集合：从国际域名列表中剔除，改由 github 组解析
         grep -i "github" /tmp/proxy-list.txt \
           | sed 's/^full://; s/^domainSuffix://; s/^domain://' \
           | grep -v "^#" | grep -v "^$" | grep -v "github\.cn" \
           | sort -u > /tmp/github-set.txt
 
+        # 国际域名：剔除 regexp:/keyword: 等无法按域名匹配的条目，清洗前缀
+        grep -Ev '^(regexp|keyword):' /tmp/proxy-list.txt \
+          | sed 's/^full://; s/^domainSuffix://; s/^domain://' \
+          | grep -v "^#" | grep -v "^$" \
+          | grep -E '^[A-Za-z0-9.-]+$' \
+          | sort -u > /tmp/proxy-clean.txt
+
         if [ -s /tmp/github-set.txt ]; then
-          grep -ivFf /tmp/github-set.txt /tmp/china-list.txt \
-            | grep -v "^#" | grep -v "^$" | sort -u \
-            > global-domains.list
+          grep -ivFf /tmp/github-set.txt /tmp/proxy-clean.txt | sort -u > global-domains.list
         else
-          grep -v "^#" /tmp/china-list.txt | grep -v "^$" | sort -u > global-domains.list
+          cp /tmp/proxy-clean.txt global-domains.list
         fi
 
         echo "global-domains.list = $(wc -l < global-domains.list) lines (github removed: $(wc -l < /tmp/github-set.txt))"
